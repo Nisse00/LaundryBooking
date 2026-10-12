@@ -15,7 +15,8 @@ frontend/
     api.ts             client for the backend
     slots.ts           time slots, their colours and the booking limit
     assets/            images imported by the code
-    pages/             one file per route: /, /login, /create-account, /calendar
+    pages/             one file per route: /, /login, /create-account, /reset-password,
+                       /calendar, /admin
     components/        pieces used by the pages
 backend/
   server.py            the API
@@ -73,6 +74,32 @@ and `npm run lint:backend` before committing.
 
 All rules are enforced by the backend; the frontend only mirrors them.
 
+To slow down password guessing, ten wrong passwords for one username block
+logging in to that account for up to 15 minutes.
+
+## Admins
+
+An admin can cancel anyone's booking from the calendar, and delete accounts
+(for example when someone moves out) under **Menu → Manage users**. The first
+admin is appointed from the command line, in `backend/`:
+
+```bash
+.venv/bin/flask --app server set-admin USERNAME
+```
+
+Add `--remove` to take the role away again.
+
+### Forgotten passwords
+
+There is no email in the system, so an admin helps out: **Reset password** on
+the Manage users page shows a one-time code, valid for 24 hours. The user
+enters it under **Forgot your password?** on the log in page and chooses a new
+password. An admin who is locked out themselves gets a code with:
+
+```bash
+.venv/bin/flask --app server reset-code USERNAME
+```
+
 ## Backend configuration
 
 Environment variables, all optional:
@@ -81,11 +108,72 @@ Environment variables, all optional:
 | ----------------------- | --------------------------------------- | -------------------------------------------- |
 | `SECRET_KEY`            | random, stored in `backend/.secret_key` | Signs the session cookie                     |
 | `LAUNDRY_DATABASE`      | `backend/laundry.db`                    | Path to the SQLite database                  |
+| `LAUNDRY_BACKUP_DIR`    | `backend/backups/`                      | Where `flask backup` puts its copies         |
 | `SESSION_COOKIE_SECURE` | off                                     | Set to `1` in production (HTTPS only cookie) |
+| `INVITE_CODE`           | none                                    | Code needed to create an account             |
 | `FLASK_DEBUG`           | off                                     | Auto-reload; the `dev` scripts turn it on    |
+
+Set `INVITE_CODE` in production and share the code within the building. Without
+it, anyone who finds the site can create an account and book time slots.
 
 The database is created on first start and is not checked in to git.
 
-In production, serve `frontend/dist/` and forward `/api` to the Flask app from the
-same domain (run it with a WSGI server, e.g. `gunicorn "server:create_app()"`, not
-`python3 server.py`). Only `backend/requirements.txt` is needed there.
+## Backups
+
+Every account and booking lives in the one database file, so back it up. This
+copies it to the backup folder, one file per day, and keeps the latest 14
+(change with `--keep`). It is safe to run while the server is in use:
+
+```bash
+.venv/bin/flask --app server backup
+```
+
+Run it daily on the server, for example with this line in `crontab -e`
+(adjust the path):
+
+```
+15 3 * * * cd /srv/laundry/backend && .venv/bin/flask --app server backup
+```
+
+The copies end up on the same disk as the database. Also sync the backup
+folder to another machine or to cloud storage, or a broken disk takes both.
+To restore, stop the server and replace the database file with a backup.
+
+## Running in production
+
+`Dockerfile` and `docker-compose.yml` set up the whole site: Caddy serves the
+built frontend over HTTPS (it fetches the certificate itself) and forwards
+`/api` to the Flask app, which runs under gunicorn. The database is kept on a
+Docker volume, so it survives updates.
+
+You need a server with Docker, and a domain name pointing to it. On the server:
+
+```bash
+cp .env.example .env
+```
+
+Fill in the three values in `.env`, then start everything:
+
+```bash
+docker compose up -d --build
+```
+
+Run the same command again after `git pull` to update. Commands from the
+sections above are run inside the container, for example:
+
+```bash
+docker compose exec api flask --app server set-admin USERNAME
+```
+
+```bash
+docker compose exec api flask --app server backup
+```
+
+For the daily backup, put `cd /path/to/LaundryBooking && docker compose exec -T
+api flask --app server backup` in the server's crontab. The copies are in the
+`laundry_data` volume, under `backups/`.
+
+Without Docker: serve `frontend/dist/` and forward `/api` to the Flask app from
+the same domain, run it with `gunicorn --preload "server:create_app()"` (not
+`python3 server.py`), and set `SECRET_KEY`, `INVITE_CODE` and
+`SESSION_COOKIE_SECURE=1`. Only `backend/requirements.txt` is needed there.

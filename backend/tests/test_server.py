@@ -1,17 +1,18 @@
 import sqlite3
 import threading
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
-from server import MAX_ACTIVE_BOOKINGS, create_app, last_bookable_day
+import server
+from server import MAX_ACTIVE_BOOKINGS, MAX_FAILED_LOGINS, create_app, last_bookable_day
 
 API = "/api/laundry"
 PASSWORD = "correct horse"
 
 
 def day(offset):
-    return (date.today() + timedelta(days=offset)).isoformat()
+    return (server.today() + timedelta(days=offset)).isoformat()
 
 
 @pytest.fixture
@@ -32,6 +33,13 @@ def register(app, username):
     return client
 
 
+def register_admin(app, username):
+    client = register(app, username)
+    result = app.test_cli_runner().invoke(args=["set-admin", username])
+    assert result.exit_code == 0, result.output
+    return client
+
+
 def book(client, booking_date, slot):
     return client.post(f"{API}/bookings", json={"date": booking_date, "slot": slot})
 
@@ -39,11 +47,11 @@ def book(client, booking_date, slot):
 class TestAccounts:
     def test_register_logs_in(self, app):
         anna = register(app, "anna")
-        assert anna.get(f"{API}/user").get_json() == {"username": "anna"}
+        assert anna.get(f"{API}/user").get_json() == {"username": "anna", "isAdmin": False}
 
     def test_username_is_trimmed(self, client):
         client.post(f"{API}/register", json={"username": " anna ", "password": PASSWORD})
-        assert client.get(f"{API}/user").get_json() == {"username": "anna"}
+        assert client.get(f"{API}/user").get_json()["username"] == "anna"
 
     def test_duplicate_username_is_rejected(self, app, client):
         register(app, "anna")
@@ -63,6 +71,22 @@ class TestAccounts:
     def test_invalid_registration_is_rejected(self, client, payload):
         assert client.post(f"{API}/register", json=payload).status_code == 400
 
+    def test_invite_code_is_required_when_configured(self, tmp_path):
+        app = create_app(
+            {"DATABASE": tmp_path / "test.db", "SECRET_KEY": "test", "INVITE_CODE": "botan"}
+        )
+        client = app.test_client()
+        account = {"username": "anna", "password": PASSWORD}
+        assert client.get(f"{API}/registration").get_json() == {"inviteCodeRequired": True}
+        assert client.post(f"{API}/register", json=account).status_code == 403
+        wrong = {**account, "inviteCode": "guess"}
+        assert client.post(f"{API}/register", json=wrong).status_code == 403
+        right = {**account, "inviteCode": " botan "}
+        assert client.post(f"{API}/register", json=right).status_code == 201
+
+    def test_no_invite_code_by_default(self, client):
+        assert client.get(f"{API}/registration").get_json() == {"inviteCodeRequired": False}
+
     def test_password_is_stored_hashed(self, app):
         register(app, "anna")
         with sqlite3.connect(app.config["DATABASE"]) as conn:
@@ -73,9 +97,9 @@ class TestAccounts:
         register(app, "anna")
         credentials = {"username": "anna", "password": PASSWORD}
         assert client.post(f"{API}/login", json=credentials).status_code == 200
-        assert client.get(f"{API}/user").get_json() == {"username": "anna"}
+        assert client.get(f"{API}/user").get_json()["username"] == "anna"
         assert client.post(f"{API}/logout").status_code == 200
-        assert client.get(f"{API}/user").get_json() == {"username": None}
+        assert client.get(f"{API}/user").get_json() == {"username": None, "isAdmin": False}
 
     @pytest.mark.parametrize(
         "credentials",
@@ -91,13 +115,50 @@ class TestAccounts:
 
     def test_legacy_plaintext_password_is_upgraded_on_login(self, app, client):
         with sqlite3.connect(app.config["DATABASE"]) as conn:
-            conn.execute("INSERT INTO laundry_users VALUES ('old', 'plaintext')")
+            conn.execute(
+                "INSERT INTO laundry_users (username, password) VALUES ('old', 'plaintext')"
+            )
         credentials = {"username": "old", "password": "plaintext"}
         assert client.post(f"{API}/login", json=credentials).status_code == 200
         with sqlite3.connect(app.config["DATABASE"]) as conn:
             (stored,) = conn.execute("SELECT password FROM laundry_users").fetchone()
         assert stored != "plaintext"
         assert app.test_client().post(f"{API}/login", json=credentials).status_code == 200
+
+
+class TestLoginAttempts:
+    RIGHT = {"username": "anna", "password": PASSWORD}
+    WRONG = {"username": "anna", "password": "wrong password"}
+
+    def fail_until_blocked(self, client):
+        for _ in range(MAX_FAILED_LOGINS):
+            assert client.post(f"{API}/login", json=self.WRONG).status_code == 401
+        assert client.post(f"{API}/login", json=self.WRONG).status_code == 429
+
+    def test_too_many_wrong_passwords_block_the_username(self, app, client):
+        register(app, "anna")
+        register(app, "bert")
+        self.fail_until_blocked(client)
+        # Even the right password, and from another browser
+        assert app.test_client().post(f"{API}/login", json=self.RIGHT).status_code == 429
+        # Other users are not affected
+        bert = {"username": "bert", "password": PASSWORD}
+        assert client.post(f"{API}/login", json=bert).status_code == 200
+
+    def test_block_is_lifted_after_a_while(self, app, client, monkeypatch):
+        register(app, "anna")
+        self.fail_until_blocked(client)
+        later = server.time.time() + server.FAILED_LOGIN_WINDOW.total_seconds() + 1
+        monkeypatch.setattr(server.time, "time", lambda: later)
+        assert client.post(f"{API}/login", json=self.RIGHT).status_code == 200
+
+    def test_successful_login_clears_the_count(self, app, client):
+        register(app, "anna")
+        for _ in range(MAX_FAILED_LOGINS - 1):
+            client.post(f"{API}/login", json=self.WRONG)
+        assert client.post(f"{API}/login", json=self.RIGHT).status_code == 200
+        assert client.post(f"{API}/login", json=self.WRONG).status_code == 401
+        assert client.post(f"{API}/login", json=self.RIGHT).status_code == 200
 
 
 class TestBookings:
@@ -194,6 +255,167 @@ class TestBookings:
         assert sorted(statuses) == [201] + [409] * 7
 
 
+class TestAdmin:
+    def test_set_admin_command(self, app):
+        anna = register_admin(app, "anna")
+        assert anna.get(f"{API}/user").get_json() == {"username": "anna", "isAdmin": True}
+        assert app.test_cli_runner().invoke(args=["set-admin", "anna", "--remove"]).exit_code == 0
+        assert anna.get(f"{API}/user").get_json() == {"username": "anna", "isAdmin": False}
+        assert app.test_cli_runner().invoke(args=["set-admin", "nobody"]).exit_code != 0
+
+    def test_existing_database_gets_the_admin_column(self, tmp_path):
+        database = tmp_path / "old.db"
+        with sqlite3.connect(database) as conn:
+            conn.execute(
+                "CREATE TABLE laundry_users (username TEXT NOT NULL PRIMARY KEY,"
+                " password TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO laundry_users VALUES ('old', 'plaintext')")
+        client = create_app({"DATABASE": database, "SECRET_KEY": "test"}).test_client()
+        response = client.post(f"{API}/login", json={"username": "old", "password": "plaintext"})
+        assert response.get_json() == {"username": "old", "isAdmin": False}
+
+    def test_admin_pages_are_for_admins_only(self, app, client):
+        bert = register(app, "bert")
+        assert client.get(f"{API}/users").status_code == 401
+        assert bert.get(f"{API}/users").status_code == 403
+        assert bert.delete(f"{API}/users/bert").status_code == 403
+
+    def test_admin_can_cancel_someone_elses_booking(self, app):
+        anna, bert = register_admin(app, "anna"), register(app, "bert")
+        book(bert, day(1), 1)
+        assert anna.delete(f"{API}/bookings/{day(1)}/1").status_code == 200
+        assert bert.get(f"{API}/bookings").get_json() == {"bookings": []}
+
+    def test_list_users(self, app):
+        anna, bert = register_admin(app, "anna"), register(app, "bert")
+        book(bert, day(1), 1)
+        assert anna.get(f"{API}/users").get_json() == {
+            "users": [
+                {"username": "anna", "isAdmin": True, "activeBookings": 0},
+                {"username": "bert", "isAdmin": False, "activeBookings": 1},
+            ]
+        }
+
+    def test_delete_user(self, app):
+        anna, bert = register_admin(app, "anna"), register(app, "odd/name bert")
+        book(bert, day(1), 1)
+        assert anna.delete(f"{API}/users/odd%2Fname%20bert").status_code == 200
+        assert anna.get(f"{API}/bookings").get_json() == {"bookings": []}
+        # The deleted user's session stops working
+        assert bert.get(f"{API}/user").get_json() == {"username": None, "isAdmin": False}
+        assert book(bert, day(1), 1).status_code == 401
+        assert anna.delete(f"{API}/users/odd%2Fname%20bert").status_code == 404
+
+    def test_admin_cannot_delete_themselves(self, app):
+        anna = register_admin(app, "anna")
+        assert anna.delete(f"{API}/users/anna").status_code == 400
+
+
+class TestPasswordReset:
+    NEW_PASSWORD = "battery staple"
+
+    def reset(self, client, username, code, password=NEW_PASSWORD):
+        payload = {"username": username, "code": code, "password": password}
+        return client.post(f"{API}/reset-password", json=payload)
+
+    def code_for(self, admin, username):
+        response = admin.post(f"{API}/users/{username}/reset-code")
+        assert response.status_code == 201
+        return response.get_json()["code"]
+
+    def test_reset_with_code_from_admin(self, app, client):
+        anna = register_admin(app, "anna")
+        register(app, "bert")
+        code = self.code_for(anna, "bert")
+        assert self.reset(client, "bert", code).status_code == 200
+        assert client.get(f"{API}/user").get_json()["username"] == "bert"
+
+        fresh = app.test_client()
+        old = {"username": "bert", "password": PASSWORD}
+        new = {"username": "bert", "password": self.NEW_PASSWORD}
+        assert fresh.post(f"{API}/login", json=old).status_code == 401
+        assert fresh.post(f"{API}/login", json=new).status_code == 200
+
+    def test_code_works_only_once(self, app, client):
+        anna = register_admin(app, "anna")
+        code = self.code_for(anna, "anna")
+        assert self.reset(client, "anna", code).status_code == 200
+        assert self.reset(client, "anna", code).status_code == 400
+
+    def test_new_code_replaces_the_old_one(self, app, client):
+        anna = register_admin(app, "anna")
+        first, second = self.code_for(anna, "anna"), self.code_for(anna, "anna")
+        assert self.reset(client, "anna", first).status_code == 400
+        assert self.reset(client, "anna", second).status_code == 200
+
+    def test_wrong_code_or_user_is_rejected(self, app, client):
+        anna = register_admin(app, "anna")
+        register(app, "bert")
+        code = self.code_for(anna, "bert")
+        assert self.reset(client, "bert", "guess").status_code == 400
+        assert self.reset(client, "anna", code).status_code == 400
+        assert self.reset(client, "bert", code, password="short").status_code == 400
+        assert client.post(f"{API}/reset-password", json={}).status_code == 400
+        # None of the failed attempts used the code up
+        assert self.reset(client, "bert", code).status_code == 200
+
+    def test_expired_code_is_rejected(self, app, client, monkeypatch):
+        anna = register_admin(app, "anna")
+        code = self.code_for(anna, "anna")
+        later = server.time.time() + server.RESET_CODE_LIFETIME.total_seconds() + 1
+        monkeypatch.setattr(server.time, "time", lambda: later)
+        assert self.reset(client, "anna", code).status_code == 400
+
+    def test_only_admins_can_create_codes(self, app, client):
+        anna, bert = register_admin(app, "anna"), register(app, "bert")
+        assert client.post(f"{API}/users/bert/reset-code").status_code == 401
+        assert bert.post(f"{API}/users/bert/reset-code").status_code == 403
+        assert anna.post(f"{API}/users/nobody/reset-code").status_code == 404
+
+    def test_reset_code_command(self, app, client):
+        register(app, "anna")
+        result = app.test_cli_runner().invoke(args=["reset-code", "anna"])
+        assert result.exit_code == 0, result.output
+        code = result.output.strip().rsplit(" ", 1)[-1]
+        assert self.reset(client, "anna", code).status_code == 200
+        assert app.test_cli_runner().invoke(args=["reset-code", "nobody"]).exit_code != 0
+
+
+class TestBackup:
+    @pytest.fixture
+    def app(self, tmp_path):
+        return create_app(
+            {
+                "DATABASE": tmp_path / "test.db",
+                "BACKUP_DIR": tmp_path / "backups",
+                "SECRET_KEY": "test",
+            }
+        )
+
+    def test_backup_is_a_copy_of_the_database(self, app, tmp_path):
+        book(register(app, "anna"), day(1), 2)
+        result = app.test_cli_runner().invoke(args=["backup"])
+        assert result.exit_code == 0, result.output
+        with sqlite3.connect(tmp_path / "backups" / f"laundry-{day(0)}.db") as conn:
+            assert conn.execute("SELECT username, booking_time FROM bookings").fetchall() == [
+                ("anna", 2)
+            ]
+
+    def test_old_backups_are_removed(self, app, tmp_path):
+        folder = tmp_path / "backups"
+        folder.mkdir()
+        for name in ("laundry-2020-01-01.db", "laundry-2020-01-02.db", "laundry-2020-01-03.db"):
+            (folder / name).touch()
+        (folder / "notes.txt").touch()
+        assert app.test_cli_runner().invoke(args=["backup", "--keep", "2"]).exit_code == 0
+        assert sorted(path.name for path in folder.iterdir()) == [
+            "laundry-2020-01-03.db",
+            f"laundry-{day(0)}.db",
+            "notes.txt",
+        ]
+
+
 @pytest.mark.parametrize(
     "today, expected",
     [
@@ -204,3 +426,13 @@ class TestBookings:
 )
 def test_last_bookable_day(today, expected):
     assert last_bookable_day(today) == expected
+
+
+def test_today_follows_swedish_time(monkeypatch):
+    class LateEveningUTC(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 7, 1, 22, 30, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(server, "datetime", LateEveningUTC)
+    assert server.today() == date(2026, 7, 2)

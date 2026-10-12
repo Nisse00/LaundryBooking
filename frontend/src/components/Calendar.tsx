@@ -6,12 +6,16 @@ import CalendarBox from "./CalendarBox";
 
 interface CalendarProps {
   readonly username: string | null;
+  /** Admins can cancel other people's bookings */
+  readonly isAdmin: boolean;
 }
 
 interface PendingAction {
   readonly action: "book" | "cancel";
   readonly date: string;
   readonly slot: number;
+  /** Set when an admin cancels someone else's booking */
+  readonly bookedBy?: string;
 }
 
 interface Notice {
@@ -35,30 +39,39 @@ const MONTH_NAMES = [
   "December",
 ];
 
+const REFRESH_INTERVAL_MS = 60_000;
+
 const toISODate = (year: number, month: number, day: number) =>
   `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 
-export default function Calendar({ username }: CalendarProps) {
+// The backend decides what "today" is by Swedish time (TIMEZONE in backend/server.py),
+// so the calendar does too, even in a browser set to another time zone.
+// The sv-SE locale formats dates as YYYY-MM-DD.
+const SWEDISH_DATE = new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Stockholm" });
+const todayInSweden = () => SWEDISH_DATE.format(new Date());
+
+export default function Calendar({ username, isAdmin }: CalendarProps) {
   const [showNextMonth, setShowNextMonth] = useState(false);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
 
-  const now = new Date();
-  const today = toISODate(now.getFullYear(), now.getMonth(), now.getDate());
+  const today = todayInSweden();
+  const [currentYear, currentMonth] = today.split("-").map(Number);
   // Date normalises month 12 to January of the following year
-  const displayed = new Date(now.getFullYear(), now.getMonth() + (showNextMonth ? 1 : 0), 1);
+  const displayed = new Date(currentYear, currentMonth - 1 + (showNextMonth ? 1 : 0), 1);
   const displayedYear = displayed.getFullYear();
   const displayedMonth = displayed.getMonth();
   const daysInMonth = new Date(displayedYear, displayedMonth + 1, 0).getDate();
   // Empty cells before the 1st so it lands under its weekday (getDay() has Sunday = 0)
   const leadingBlanks = (displayed.getDay() + 6) % 7;
 
-  const refreshBookings = useCallback(async () => {
+  // `quiet` is for refreshes the user did not ask for: a failed one is not worth an error
+  const refreshBookings = useCallback(async (quiet = false) => {
     try {
       setBookings(await getBookings());
     } catch (err) {
-      setNotice({ kind: "danger", text: errorMessage(err) });
+      if (!quiet) setNotice({ kind: "danger", text: errorMessage(err) });
     }
   }, []);
 
@@ -68,6 +81,20 @@ export default function Calendar({ username }: CalendarProps) {
     setNotice(null);
     refreshBookings();
   }, [refreshBookings, username]);
+
+  // Other people book while the page is open: refresh every minute while the
+  // tab is visible, and as soon as you come back to it
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") refreshBookings(true);
+    };
+    const timer = window.setInterval(refreshIfVisible, REFRESH_INTERVAL_MS);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [refreshBookings]);
 
   const reachedBookingLimit =
     bookings.filter((booking) => booking.mine).length >= MAX_ACTIVE_BOOKINGS;
@@ -94,11 +121,11 @@ export default function Calendar({ username }: CalendarProps) {
     switch (slotStatus(date, slot)) {
       case "mine":
         return setPending({ action: "cancel", date, slot });
-      case "taken":
-        return setNotice({
-          kind: "info",
-          text: `${when} is booked by ${findBooking(date, slot)?.bookedBy ?? "another user"}.`,
-        });
+      case "taken": {
+        const bookedBy = findBooking(date, slot)?.bookedBy ?? "another user";
+        if (isAdmin) return setPending({ action: "cancel", date, slot, bookedBy });
+        return setNotice({ kind: "info", text: `${when} is booked by ${bookedBy}.` });
+      }
       case "free":
         if (reachedBookingLimit) {
           return fail(
@@ -194,7 +221,12 @@ export default function Calendar({ username }: CalendarProps) {
       <BookingPopout
         show={pending !== null}
         action={pending?.action ?? "book"}
-        text={pending ? `${pending.date}, ${TIME_SLOTS[pending.slot - 1]}` : ""}
+        text={
+          pending
+            ? `${pending.date}, ${TIME_SLOTS[pending.slot - 1]}` +
+              (pending.bookedBy ? `, booked by ${pending.bookedBy}` : "")
+            : ""
+        }
         onClose={() => setPending(null)}
         onConfirm={handleConfirm}
       />

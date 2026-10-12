@@ -33,3 +33,5 @@ backend/.secret_key
 .pytest_cache/
 .ruff_cache/
 *.tsbuildinfo
+backend/backups/
+.env
