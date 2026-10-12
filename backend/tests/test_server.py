@@ -1,0 +1,206 @@
+import sqlite3
+import threading
+from datetime import date, timedelta
+
+import pytest
+
+from server import MAX_ACTIVE_BOOKINGS, create_app, last_bookable_day
+
+API = "/api/laundry"
+PASSWORD = "correct horse"
+
+
+def day(offset):
+    return (date.today() + timedelta(days=offset)).isoformat()
+
+
+@pytest.fixture
+def app(tmp_path):
+    return create_app({"DATABASE": tmp_path / "test.db", "SECRET_KEY": "test", "TESTING": True})
+
+
+@pytest.fixture
+def client(app):
+    return app.test_client()
+
+
+def register(app, username):
+    """A separate client (own cookie jar) logged in as a new user."""
+    client = app.test_client()
+    response = client.post(f"{API}/register", json={"username": username, "password": PASSWORD})
+    assert response.status_code == 201
+    return client
+
+
+def book(client, booking_date, slot):
+    return client.post(f"{API}/bookings", json={"date": booking_date, "slot": slot})
+
+
+class TestAccounts:
+    def test_register_logs_in(self, app):
+        anna = register(app, "anna")
+        assert anna.get(f"{API}/user").get_json() == {"username": "anna"}
+
+    def test_username_is_trimmed(self, client):
+        client.post(f"{API}/register", json={"username": " anna ", "password": PASSWORD})
+        assert client.get(f"{API}/user").get_json() == {"username": "anna"}
+
+    def test_duplicate_username_is_rejected(self, app, client):
+        register(app, "anna")
+        response = client.post(f"{API}/register", json={"username": "anna", "password": PASSWORD})
+        assert response.status_code == 409
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"username": "anna"},
+            {"username": "", "password": PASSWORD},
+            {"username": "anna", "password": "short"},
+            {"username": 1, "password": PASSWORD},
+        ],
+    )
+    def test_invalid_registration_is_rejected(self, client, payload):
+        assert client.post(f"{API}/register", json=payload).status_code == 400
+
+    def test_password_is_stored_hashed(self, app):
+        register(app, "anna")
+        with sqlite3.connect(app.config["DATABASE"]) as conn:
+            (stored,) = conn.execute("SELECT password FROM laundry_users").fetchone()
+        assert PASSWORD not in stored
+
+    def test_login_and_logout(self, app, client):
+        register(app, "anna")
+        credentials = {"username": "anna", "password": PASSWORD}
+        assert client.post(f"{API}/login", json=credentials).status_code == 200
+        assert client.get(f"{API}/user").get_json() == {"username": "anna"}
+        assert client.post(f"{API}/logout").status_code == 200
+        assert client.get(f"{API}/user").get_json() == {"username": None}
+
+    @pytest.mark.parametrize(
+        "credentials",
+        [
+            {"username": "anna", "password": "wrong password"},
+            {"username": "nobody", "password": PASSWORD},
+            {},
+        ],
+    )
+    def test_bad_login_is_rejected(self, app, client, credentials):
+        register(app, "anna")
+        assert client.post(f"{API}/login", json=credentials).status_code == 401
+
+    def test_legacy_plaintext_password_is_upgraded_on_login(self, app, client):
+        with sqlite3.connect(app.config["DATABASE"]) as conn:
+            conn.execute("INSERT INTO laundry_users VALUES ('old', 'plaintext')")
+        credentials = {"username": "old", "password": "plaintext"}
+        assert client.post(f"{API}/login", json=credentials).status_code == 200
+        with sqlite3.connect(app.config["DATABASE"]) as conn:
+            (stored,) = conn.execute("SELECT password FROM laundry_users").fetchone()
+        assert stored != "plaintext"
+        assert app.test_client().post(f"{API}/login", json=credentials).status_code == 200
+
+
+class TestBookings:
+    def test_requires_login(self, client):
+        assert book(client, day(1), 1).status_code == 401
+        assert client.delete(f"{API}/bookings/{day(1)}/1").status_code == 401
+
+    def test_book_and_list(self, app):
+        anna, bert = register(app, "anna"), register(app, "bert")
+        assert book(anna, day(1), 2).status_code == 201
+        booking = {"date": day(1), "slot": 2, "bookedBy": "anna"}
+        assert anna.get(f"{API}/bookings").get_json() == {"bookings": [{**booking, "mine": True}]}
+        assert bert.get(f"{API}/bookings").get_json() == {"bookings": [{**booking, "mine": False}]}
+
+    def test_names_are_hidden_when_logged_out(self, app, client):
+        book(register(app, "anna"), day(1), 2)
+        assert client.get(f"{API}/bookings").get_json() == {
+            "bookings": [{"date": day(1), "slot": 2, "mine": False, "bookedBy": None}]
+        }
+
+    def test_slot_can_only_be_booked_once(self, app):
+        anna, bert = register(app, "anna"), register(app, "bert")
+        assert book(anna, day(1), 1).status_code == 201
+        assert book(bert, day(1), 1).status_code == 409
+
+    def test_limited_number_of_active_bookings(self, app):
+        anna = register(app, "anna")
+        for offset in range(1, MAX_ACTIVE_BOOKINGS + 1):
+            assert book(anna, day(offset), 1).status_code == 201
+        assert book(anna, day(MAX_ACTIVE_BOOKINGS + 1), 1).status_code == 409
+        assert anna.delete(f"{API}/bookings/{day(1)}/1").status_code == 200
+        assert book(anna, day(MAX_ACTIVE_BOOKINGS + 1), 1).status_code == 201
+
+    def test_past_bookings_do_not_count_towards_the_limit(self, app):
+        anna = register(app, "anna")
+        with sqlite3.connect(app.config["DATABASE"]) as conn:
+            for slot in (1, 2, 3):
+                conn.execute(
+                    "INSERT INTO bookings (username, booking_date, booking_time)"
+                    " VALUES ('anna', ?, ?)",
+                    (day(-1), slot),
+                )
+        assert book(anna, day(1), 1).status_code == 201
+
+    def test_cancel_then_book_again(self, app):
+        anna = register(app, "anna")
+        book(anna, day(1), 1)
+        assert anna.delete(f"{API}/bookings/{day(1)}/1").status_code == 200
+        assert book(anna, day(2), 3).status_code == 201
+
+    def test_cannot_cancel_someone_elses_booking(self, app):
+        anna, bert = register(app, "anna"), register(app, "bert")
+        book(anna, day(1), 1)
+        assert bert.delete(f"{API}/bookings/{day(1)}/1").status_code == 404
+        assert len(anna.get(f"{API}/bookings").get_json()["bookings"]) == 1
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"date": "not-a-date", "slot": 1},
+            {"date": day(1), "slot": 0},
+            {"date": day(1), "slot": 4},
+            {"date": day(1), "slot": "1"},
+            {"date": day(1), "slot": True},
+            {"date": day(-1), "slot": 1},
+            {"date": day(70), "slot": 1},
+        ],
+    )
+    def test_invalid_booking_is_rejected(self, app, payload):
+        anna = register(app, "anna")
+        assert anna.post(f"{API}/bookings", json=payload).status_code == 400
+
+    def test_past_bookings_are_not_listed(self, app, client):
+        register(app, "anna")
+        with sqlite3.connect(app.config["DATABASE"]) as conn:
+            conn.execute(
+                "INSERT INTO bookings (username, booking_date, booking_time) VALUES ('anna', ?, 1)",
+                (day(-1),),
+            )
+        assert client.get(f"{API}/bookings").get_json() == {"bookings": []}
+
+    def test_simultaneous_requests_for_one_slot(self, app):
+        clients = [register(app, f"user{i}") for i in range(8)]
+        statuses = []
+        threads = [
+            threading.Thread(target=lambda c=c: statuses.append(book(c, day(1), 1).status_code))
+            for c in clients
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert sorted(statuses) == [201] + [409] * 7
+
+
+@pytest.mark.parametrize(
+    "today, expected",
+    [
+        (date(2026, 10, 11), date(2026, 11, 30)),
+        (date(2026, 12, 31), date(2027, 1, 31)),
+        (date(2028, 1, 31), date(2028, 2, 29)),
+    ],
+)
+def test_last_bookable_day(today, expected):
+    assert last_bookable_day(today) == expected
