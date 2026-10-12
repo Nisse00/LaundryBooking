@@ -39,6 +39,8 @@ const MONTH_NAMES = [
   "December",
 ];
 
+const REFRESH_INTERVAL_MS = 60_000;
+
 const toISODate = (year: number, month: number, day: number) =>
   `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 
@@ -64,11 +66,12 @@ export default function Calendar({ username, isAdmin }: CalendarProps) {
   // Empty cells before the 1st so it lands under its weekday (getDay() has Sunday = 0)
   const leadingBlanks = (displayed.getDay() + 6) % 7;
 
-  const refreshBookings = useCallback(async () => {
+  // `quiet` is for refreshes the user did not ask for: a failed one is not worth an error
+  const refreshBookings = useCallback(async (quiet = false) => {
     try {
       setBookings(await getBookings());
     } catch (err) {
-      setNotice({ kind: "danger", text: errorMessage(err) });
+      if (!quiet) setNotice({ kind: "danger", text: errorMessage(err) });
     }
   }, []);
 
@@ -78,6 +81,20 @@ export default function Calendar({ username, isAdmin }: CalendarProps) {
     setNotice(null);
     refreshBookings();
   }, [refreshBookings, username]);
+
+  // Other people book while the page is open: refresh every minute while the
+  // tab is visible, and as soon as you come back to it
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") refreshBookings(true);
+    };
+    const timer = window.setInterval(refreshIfVisible, REFRESH_INTERVAL_MS);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [refreshBookings]);
 
   const reachedBookingLimit =
     bookings.filter((booking) => booking.mine).length >= MAX_ACTIVE_BOOKINGS;
