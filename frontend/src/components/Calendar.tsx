@@ -38,16 +38,22 @@ const MONTH_NAMES = [
 const toISODate = (year: number, month: number, day: number) =>
   `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 
+// The backend decides what "today" is by Swedish time (TIMEZONE in backend/server.py),
+// so the calendar does too, even in a browser set to another time zone.
+// The sv-SE locale formats dates as YYYY-MM-DD.
+const SWEDISH_DATE = new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Stockholm" });
+const todayInSweden = () => SWEDISH_DATE.format(new Date());
+
 export default function Calendar({ username }: CalendarProps) {
   const [showNextMonth, setShowNextMonth] = useState(false);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
 
-  const now = new Date();
-  const today = toISODate(now.getFullYear(), now.getMonth(), now.getDate());
+  const today = todayInSweden();
+  const [currentYear, currentMonth] = today.split("-").map(Number);
   // Date normalises month 12 to January of the following year
-  const displayed = new Date(now.getFullYear(), now.getMonth() + (showNextMonth ? 1 : 0), 1);
+  const displayed = new Date(currentYear, currentMonth - 1 + (showNextMonth ? 1 : 0), 1);
   const displayedYear = displayed.getFullYear();
   const displayedMonth = displayed.getMonth();
   const daysInMonth = new Date(displayedYear, displayedMonth + 1, 0).getDate();

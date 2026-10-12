@@ -1,9 +1,10 @@
 import sqlite3
 import threading
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
+import server
 from server import MAX_ACTIVE_BOOKINGS, create_app, last_bookable_day
 
 API = "/api/laundry"
@@ -11,7 +12,7 @@ PASSWORD = "correct horse"
 
 
 def day(offset):
-    return (date.today() + timedelta(days=offset)).isoformat()
+    return (server.today() + timedelta(days=offset)).isoformat()
 
 
 @pytest.fixture
@@ -204,3 +205,13 @@ class TestBookings:
 )
 def test_last_bookable_day(today, expected):
     assert last_bookable_day(today) == expected
+
+
+def test_today_follows_swedish_time(monkeypatch):
+    class LateEveningUTC(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 7, 1, 22, 30, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(server, "datetime", LateEveningUTC)
+    assert server.today() == date(2026, 7, 2)

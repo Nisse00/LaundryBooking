@@ -5,9 +5,10 @@ import os
 import secrets
 import sqlite3
 from contextlib import closing
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import wraps
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from flask import Blueprint, Flask, current_app, g, jsonify, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -15,6 +16,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 BASE_DIR = Path(__file__).resolve().parent
 SECRET_KEY_FILE = BASE_DIR / ".secret_key"
 
+# "Today" is decided by the clock in Lund, wherever the server happens to run
+TIMEZONE = ZoneInfo("Europe/Stockholm")
 # Time slots 1-3 are 08:00-12:00, 12:00-16:00 and 16:00-20:00
 SLOTS = (1, 2, 3)
 MIN_PASSWORD_LENGTH = 8
@@ -124,6 +127,10 @@ def log_in(username):
     session.permanent = True
 
 
+def today():
+    return datetime.now(TIMEZONE).date()
+
+
 def last_bookable_day(today):
     """The calendar shows this month and the next one."""
     first_of_month_after_next = (today.replace(day=1) + timedelta(days=62)).replace(day=1)
@@ -138,10 +145,9 @@ def parse_slot(booking_date, slot):
         return "Invalid date."
     if isinstance(slot, bool) or slot not in SLOTS:
         return "Invalid time slot."
-    today = date.today()
-    if day < today:
+    if day < today():
         return "You cannot book or cancel a time slot in the past."
-    if day > last_bookable_day(today):
+    if day > last_bookable_day(today()):
         return "You can only book this month and the next."
     return None
 
@@ -216,7 +222,7 @@ def list_bookings():
         .execute(
             "SELECT booking_date, booking_time, username FROM bookings"
             " WHERE booking_date >= ? ORDER BY booking_date, booking_time",
-            (date.today().isoformat(),),
+            (today().isoformat(),),
         )
         .fetchall()
     )
@@ -253,7 +259,7 @@ def create_booking():
     try:
         (active,) = db.execute(
             "SELECT COUNT(*) FROM bookings WHERE username = ? AND booking_date >= ?",
-            (username, date.today().isoformat()),
+            (username, today().isoformat()),
         ).fetchone()
         if active >= MAX_ACTIVE_BOOKINGS:
             db.execute("ROLLBACK")
