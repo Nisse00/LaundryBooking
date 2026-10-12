@@ -1,0 +1,15 @@
+# Caddy fetches and renews the HTTPS certificate for the address by itself
+{$SITE_ADDRESS} {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		root * /srv
+		# The frontend does its own routing: unknown paths get index.html
+		try_files {path} /index.html
+		file_server
+	}
+}

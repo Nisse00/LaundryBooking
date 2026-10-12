@@ -1,0 +1,35 @@
+# Production setup. Copy .env.example to .env and fill it in, then:
+#   docker compose up -d --build
+services:
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in .env}
+    volumes:
+      - caddy_data:/data
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: .
+      target: api
+    restart: unless-stopped
+    environment:
+      SECRET_KEY: ${SECRET_KEY:?set SECRET_KEY in .env}
+      INVITE_CODE: ${INVITE_CODE:?set INVITE_CODE in .env}
+      SESSION_COOKIE_SECURE: "1"
+    volumes:
+      - laundry_data:/data
+
+volumes:
+  # HTTPS certificates
+  caddy_data:
+  # The database and its backups
+  laundry_data:

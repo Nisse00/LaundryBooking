@@ -139,6 +139,41 @@ The copies end up on the same disk as the database. Also sync the backup
 folder to another machine or to cloud storage, or a broken disk takes both.
 To restore, stop the server and replace the database file with a backup.
 
-In production, serve `frontend/dist/` and forward `/api` to the Flask app from the
-same domain (run it with a WSGI server, e.g. `gunicorn "server:create_app()"`, not
-`python3 server.py`). Only `backend/requirements.txt` is needed there.
+## Running in production
+
+`Dockerfile` and `docker-compose.yml` set up the whole site: Caddy serves the
+built frontend over HTTPS (it fetches the certificate itself) and forwards
+`/api` to the Flask app, which runs under gunicorn. The database is kept on a
+Docker volume, so it survives updates.
+
+You need a server with Docker, and a domain name pointing to it. On the server:
+
+```bash
+cp .env.example .env
+```
+
+Fill in the three values in `.env`, then start everything:
+
+```bash
+docker compose up -d --build
+```
+
+Run the same command again after `git pull` to update. Commands from the
+sections above are run inside the container, for example:
+
+```bash
+docker compose exec api flask --app server set-admin USERNAME
+```
+
+```bash
+docker compose exec api flask --app server backup
+```
+
+For the daily backup, put `cd /path/to/LaundryBooking && docker compose exec -T
+api flask --app server backup` in the server's crontab. The copies are in the
+`laundry_data` volume, under `backups/`.
+
+Without Docker: serve `frontend/dist/` and forward `/api` to the Flask app from
+the same domain, run it with `gunicorn --preload "server:create_app()"` (not
+`python3 server.py`), and set `SECRET_KEY`, `INVITE_CODE` and
+`SESSION_COOKIE_SECURE=1`. Only `backend/requirements.txt` is needed there.

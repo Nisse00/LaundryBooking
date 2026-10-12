@@ -1,1 +1,5 @@
 flask>=3.0,<4
+# Production server (see the Dockerfile)
+gunicorn>=23
+# Time zone data for systems that do not ship their own
+tzdata

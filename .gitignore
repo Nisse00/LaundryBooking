@@ -34,3 +34,4 @@ backend/.secret_key
 .ruff_cache/
 *.tsbuildinfo
 backend/backups/
+.env
