@@ -10,7 +10,9 @@ from functools import wraps
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import click
 from flask import Blueprint, Flask, current_app, g, jsonify, request, session
+from flask.cli import with_appcontext
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -27,7 +29,8 @@ HASH_PREFIXES = ("scrypt:", "pbkdf2:")
 SCHEMA = """
     CREATE TABLE IF NOT EXISTS laundry_users (
         username TEXT NOT NULL PRIMARY KEY,
-        password TEXT NOT NULL
+        password TEXT NOT NULL,
+        is_admin INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS bookings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,10 +78,34 @@ def create_app(config=None):
 
     with closing(connect(app.config["DATABASE"])) as conn:
         conn.executescript(SCHEMA)
+        # Databases created before there were admins lack the column
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(laundry_users)")]
+        if "is_admin" not in columns:
+            conn.execute("ALTER TABLE laundry_users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
 
     app.teardown_appcontext(close_db)
     app.register_blueprint(api)
+    app.cli.add_command(set_admin)
     return app
+
+
+@click.command("set-admin")
+@click.argument("username")
+@click.option("--remove", is_flag=True, help="Take the admin role away instead.")
+@with_appcontext
+def set_admin(username, remove):
+    """Make USERNAME an admin: flask --app server set-admin USERNAME"""
+    updated = (
+        get_db()
+        .execute(
+            "UPDATE laundry_users SET is_admin = ? WHERE username = ?",
+            (0 if remove else 1, username),
+        )
+        .rowcount
+    )
+    if not updated:
+        raise click.ClickException(f"There is no user called {username!r}.")
+    click.echo(f"{username} is {'no longer' if remove else 'now'} an admin.")
 
 
 def connect(database):
@@ -104,11 +131,44 @@ def error(message, status):
     return jsonify({"message": message}), status
 
 
+def logged_in_user():
+    """The row of the logged-in user, or None.
+
+    Looked up on every request, so a deleted account is logged out and a
+    change of the admin role takes effect immediately.
+    """
+    if "user" not in g:
+        g.user = None
+        if "username" in session:
+            g.user = (
+                get_db()
+                .execute(
+                    "SELECT username, is_admin FROM laundry_users WHERE username = ?",
+                    (session["username"],),
+                )
+                .fetchone()
+            )
+            if g.user is None:
+                session.clear()
+    return g.user
+
+
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if "username" not in session:
+        if logged_in_user() is None:
             return error("You must be logged in to do that.", 401)
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapped(*args, **kwargs):
+        if not logged_in_user()["is_admin"]:
+            return error("Only an admin can do that.", 403)
         return view(*args, **kwargs)
 
     return wrapped
@@ -184,7 +244,7 @@ def register():
         return error("That username is already taken.", 409)
 
     log_in(username)
-    return jsonify({"username": username}), 201
+    return jsonify({"username": username, "isAdmin": False}), 201
 
 
 @api.post("/login")
@@ -212,7 +272,7 @@ def login():
         return error("Wrong username or password.", 401)
 
     log_in(username)
-    return jsonify({"username": username})
+    return current_user()
 
 
 @api.post("/logout")
@@ -223,7 +283,13 @@ def logout():
 
 @api.get("/user")
 def current_user():
-    return jsonify({"username": session.get("username")})
+    user = logged_in_user()
+    return jsonify(
+        {
+            "username": user["username"] if user else None,
+            "isAdmin": bool(user and user["is_admin"]),
+        }
+    )
 
 
 @api.get("/bookings")
@@ -241,7 +307,8 @@ def list_bookings():
         )
         .fetchall()
     )
-    username = session.get("username")
+    user = logged_in_user()
+    username = user["username"] if user else None
     return jsonify(
         {
             "bookings": [
@@ -305,17 +372,71 @@ def delete_booking(booking_date, slot):
     if problem:
         return error(problem, 400)
 
+    # An admin may cancel anyone's booking
+    user = logged_in_user()
     deleted = (
         get_db()
         .execute(
-            "DELETE FROM bookings WHERE username = ? AND booking_date = ? AND booking_time = ?",
-            (session["username"], booking_date, slot),
+            "DELETE FROM bookings WHERE booking_date = ? AND booking_time = ?"
+            " AND (username = ? OR ?)",
+            (booking_date, slot, user["username"], user["is_admin"]),
         )
         .rowcount
     )
     if not deleted:
         return error("Booking not found, or it is not yours.", 404)
     return jsonify({"message": "Booking cancelled"})
+
+
+@api.get("/users")
+@admin_required
+def list_users():
+    rows = (
+        get_db()
+        .execute(
+            "SELECT u.username, u.is_admin, COUNT(b.id) AS active_bookings"
+            " FROM laundry_users u"
+            " LEFT JOIN bookings b ON b.username = u.username AND b.booking_date >= ?"
+            " GROUP BY u.username ORDER BY u.username COLLATE NOCASE",
+            (today().isoformat(),),
+        )
+        .fetchall()
+    )
+    return jsonify(
+        {
+            "users": [
+                {
+                    "username": row["username"],
+                    "isAdmin": bool(row["is_admin"]),
+                    "activeBookings": row["active_bookings"],
+                }
+                for row in rows
+            ]
+        }
+    )
+
+
+# `path` so that a username containing a slash still matches
+@api.delete("/users/<path:username>")
+@admin_required
+def delete_user(username):
+    """Remove an account and all its bookings, e.g. when someone moves out."""
+    if username == logged_in_user()["username"]:
+        return error("You cannot delete your own account.", 400)
+
+    db = get_db()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("DELETE FROM bookings WHERE username = ?", (username,))
+        deleted = db.execute("DELETE FROM laundry_users WHERE username = ?", (username,)).rowcount
+        db.execute("COMMIT")
+    except BaseException:
+        db.execute("ROLLBACK")
+        raise
+
+    if not deleted:
+        return error("User not found.", 404)
+    return jsonify({"message": "User deleted"})
 
 
 if __name__ == "__main__":

@@ -6,12 +6,16 @@ import CalendarBox from "./CalendarBox";
 
 interface CalendarProps {
   readonly username: string | null;
+  /** Admins can cancel other people's bookings */
+  readonly isAdmin: boolean;
 }
 
 interface PendingAction {
   readonly action: "book" | "cancel";
   readonly date: string;
   readonly slot: number;
+  /** Set when an admin cancels someone else's booking */
+  readonly bookedBy?: string;
 }
 
 interface Notice {
@@ -44,7 +48,7 @@ const toISODate = (year: number, month: number, day: number) =>
 const SWEDISH_DATE = new Intl.DateTimeFormat("sv-SE", { timeZone: "Europe/Stockholm" });
 const todayInSweden = () => SWEDISH_DATE.format(new Date());
 
-export default function Calendar({ username }: CalendarProps) {
+export default function Calendar({ username, isAdmin }: CalendarProps) {
   const [showNextMonth, setShowNextMonth] = useState(false);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [pending, setPending] = useState<PendingAction | null>(null);
@@ -100,11 +104,11 @@ export default function Calendar({ username }: CalendarProps) {
     switch (slotStatus(date, slot)) {
       case "mine":
         return setPending({ action: "cancel", date, slot });
-      case "taken":
-        return setNotice({
-          kind: "info",
-          text: `${when} is booked by ${findBooking(date, slot)?.bookedBy ?? "another user"}.`,
-        });
+      case "taken": {
+        const bookedBy = findBooking(date, slot)?.bookedBy ?? "another user";
+        if (isAdmin) return setPending({ action: "cancel", date, slot, bookedBy });
+        return setNotice({ kind: "info", text: `${when} is booked by ${bookedBy}.` });
+      }
       case "free":
         if (reachedBookingLimit) {
           return fail(
@@ -200,7 +204,12 @@ export default function Calendar({ username }: CalendarProps) {
       <BookingPopout
         show={pending !== null}
         action={pending?.action ?? "book"}
-        text={pending ? `${pending.date}, ${TIME_SLOTS[pending.slot - 1]}` : ""}
+        text={
+          pending
+            ? `${pending.date}, ${TIME_SLOTS[pending.slot - 1]}` +
+              (pending.bookedBy ? `, booked by ${pending.bookedBy}` : "")
+            : ""
+        }
         onClose={() => setPending(null)}
         onConfirm={handleConfirm}
       />

@@ -33,6 +33,13 @@ def register(app, username):
     return client
 
 
+def register_admin(app, username):
+    client = register(app, username)
+    result = app.test_cli_runner().invoke(args=["set-admin", username])
+    assert result.exit_code == 0, result.output
+    return client
+
+
 def book(client, booking_date, slot):
     return client.post(f"{API}/bookings", json={"date": booking_date, "slot": slot})
 
@@ -40,11 +47,11 @@ def book(client, booking_date, slot):
 class TestAccounts:
     def test_register_logs_in(self, app):
         anna = register(app, "anna")
-        assert anna.get(f"{API}/user").get_json() == {"username": "anna"}
+        assert anna.get(f"{API}/user").get_json() == {"username": "anna", "isAdmin": False}
 
     def test_username_is_trimmed(self, client):
         client.post(f"{API}/register", json={"username": " anna ", "password": PASSWORD})
-        assert client.get(f"{API}/user").get_json() == {"username": "anna"}
+        assert client.get(f"{API}/user").get_json()["username"] == "anna"
 
     def test_duplicate_username_is_rejected(self, app, client):
         register(app, "anna")
@@ -90,9 +97,9 @@ class TestAccounts:
         register(app, "anna")
         credentials = {"username": "anna", "password": PASSWORD}
         assert client.post(f"{API}/login", json=credentials).status_code == 200
-        assert client.get(f"{API}/user").get_json() == {"username": "anna"}
+        assert client.get(f"{API}/user").get_json()["username"] == "anna"
         assert client.post(f"{API}/logout").status_code == 200
-        assert client.get(f"{API}/user").get_json() == {"username": None}
+        assert client.get(f"{API}/user").get_json() == {"username": None, "isAdmin": False}
 
     @pytest.mark.parametrize(
         "credentials",
@@ -108,7 +115,9 @@ class TestAccounts:
 
     def test_legacy_plaintext_password_is_upgraded_on_login(self, app, client):
         with sqlite3.connect(app.config["DATABASE"]) as conn:
-            conn.execute("INSERT INTO laundry_users VALUES ('old', 'plaintext')")
+            conn.execute(
+                "INSERT INTO laundry_users (username, password) VALUES ('old', 'plaintext')"
+            )
         credentials = {"username": "old", "password": "plaintext"}
         assert client.post(f"{API}/login", json=credentials).status_code == 200
         with sqlite3.connect(app.config["DATABASE"]) as conn:
@@ -209,6 +218,63 @@ class TestBookings:
         for thread in threads:
             thread.join()
         assert sorted(statuses) == [201] + [409] * 7
+
+
+class TestAdmin:
+    def test_set_admin_command(self, app):
+        anna = register_admin(app, "anna")
+        assert anna.get(f"{API}/user").get_json() == {"username": "anna", "isAdmin": True}
+        assert app.test_cli_runner().invoke(args=["set-admin", "anna", "--remove"]).exit_code == 0
+        assert anna.get(f"{API}/user").get_json() == {"username": "anna", "isAdmin": False}
+        assert app.test_cli_runner().invoke(args=["set-admin", "nobody"]).exit_code != 0
+
+    def test_existing_database_gets_the_admin_column(self, tmp_path):
+        database = tmp_path / "old.db"
+        with sqlite3.connect(database) as conn:
+            conn.execute(
+                "CREATE TABLE laundry_users (username TEXT NOT NULL PRIMARY KEY,"
+                " password TEXT NOT NULL)"
+            )
+            conn.execute("INSERT INTO laundry_users VALUES ('old', 'plaintext')")
+        client = create_app({"DATABASE": database, "SECRET_KEY": "test"}).test_client()
+        response = client.post(f"{API}/login", json={"username": "old", "password": "plaintext"})
+        assert response.get_json() == {"username": "old", "isAdmin": False}
+
+    def test_admin_pages_are_for_admins_only(self, app, client):
+        bert = register(app, "bert")
+        assert client.get(f"{API}/users").status_code == 401
+        assert bert.get(f"{API}/users").status_code == 403
+        assert bert.delete(f"{API}/users/bert").status_code == 403
+
+    def test_admin_can_cancel_someone_elses_booking(self, app):
+        anna, bert = register_admin(app, "anna"), register(app, "bert")
+        book(bert, day(1), 1)
+        assert anna.delete(f"{API}/bookings/{day(1)}/1").status_code == 200
+        assert bert.get(f"{API}/bookings").get_json() == {"bookings": []}
+
+    def test_list_users(self, app):
+        anna, bert = register_admin(app, "anna"), register(app, "bert")
+        book(bert, day(1), 1)
+        assert anna.get(f"{API}/users").get_json() == {
+            "users": [
+                {"username": "anna", "isAdmin": True, "activeBookings": 0},
+                {"username": "bert", "isAdmin": False, "activeBookings": 1},
+            ]
+        }
+
+    def test_delete_user(self, app):
+        anna, bert = register_admin(app, "anna"), register(app, "odd/name bert")
+        book(bert, day(1), 1)
+        assert anna.delete(f"{API}/users/odd%2Fname%20bert").status_code == 200
+        assert anna.get(f"{API}/bookings").get_json() == {"bookings": []}
+        # The deleted user's session stops working
+        assert bert.get(f"{API}/user").get_json() == {"username": None, "isAdmin": False}
+        assert book(bert, day(1), 1).status_code == 401
+        assert anna.delete(f"{API}/users/odd%2Fname%20bert").status_code == 404
+
+    def test_admin_cannot_delete_themselves(self, app):
+        anna = register_admin(app, "anna")
+        assert anna.delete(f"{API}/users/anna").status_code == 400
 
 
 @pytest.mark.parametrize(

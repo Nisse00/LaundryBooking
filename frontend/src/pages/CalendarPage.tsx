@@ -5,11 +5,15 @@ import Menu from "../components/Menu";
 
 export default function CalendarPage() {
   const [username, setUsername] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     getUser()
-      .then(setUsername)
+      .then((user) => {
+        setUsername(user.username);
+        setIsAdmin(user.isAdmin);
+      })
       .catch((err) => setError(errorMessage(err)));
   }, []);
 
@@ -17,6 +21,7 @@ export default function CalendarPage() {
     try {
       await logout();
       setUsername(null);
+      setIsAdmin(false);
       setError("");
     } catch (err) {
       setError(errorMessage(err));
@@ -26,7 +31,7 @@ export default function CalendarPage() {
   return (
     <div className="laundry-page">
       <div className="laundry-topbar">
-        <Menu username={username} onLogOut={handleLogOut} />
+        <Menu username={username} isAdmin={isAdmin} onLogOut={handleLogOut} />
         <span>{username ? `Logged in as ${username}` : "Not logged in"}</span>
       </div>
       {error && (
@@ -34,7 +39,7 @@ export default function CalendarPage() {
           {error}
         </div>
       )}
-      <Calendar username={username} />
+      <Calendar username={username} isAdmin={isAdmin} />
     </div>
   );
 }

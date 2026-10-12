@@ -28,8 +28,21 @@ async function request<T>(path: string, method = "GET", body?: unknown): Promise
   return data as T;
 }
 
-export async function getUser(): Promise<string | null> {
-  return (await request<{ username: string | null }>("/user")).username;
+export interface CurrentUser {
+  /** null when nobody is logged in */
+  username: string | null;
+  isAdmin: boolean;
+}
+
+/** A row in the admin's list of users */
+export interface AdminUser {
+  username: string;
+  isAdmin: boolean;
+  activeBookings: number;
+}
+
+export async function getUser(): Promise<CurrentUser> {
+  return await request<CurrentUser>("/user");
 }
 
 export async function login(username: string, password: string): Promise<void> {
@@ -53,6 +66,16 @@ export async function logout(): Promise<void> {
   await request("/logout", "POST");
 }
 
+/** Admins only. */
+export async function getUsers(): Promise<AdminUser[]> {
+  return (await request<{ users: AdminUser[] }>("/users")).users;
+}
+
+/** Admins only. Also removes the user's bookings. */
+export async function deleteUser(username: string): Promise<void> {
+  await request(`/users/${encodeURIComponent(username)}`, "DELETE");
+}
+
 /** All bookings from today onwards. */
 export async function getBookings(): Promise<Booking[]> {
   return (await request<{ bookings: Booking[] }>("/bookings")).bookings;
@@ -62,6 +85,7 @@ export async function createBooking(date: string, slot: number): Promise<void> {
   await request("/bookings", "POST", { date, slot });
 }
 
+/** Your own booking, or anyone's if you are an admin. */
 export async function cancelBooking(date: string, slot: number): Promise<void> {
   await request(`/bookings/${date}/${slot}`, "DELETE");
 }

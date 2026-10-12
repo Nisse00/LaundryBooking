@@ -1,4 +1,5 @@
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import AdminPage from "./pages/AdminPage";
 import AuthPage from "./pages/AuthPage";
 import CalendarPage from "./pages/CalendarPage";
 import HomePage from "./pages/HomePage";
@@ -12,6 +13,7 @@ export default function App() {
         <Route path="/login" element={<AuthPage key="login" mode="login" />} />
         <Route path="/create-account" element={<AuthPage key="register" mode="register" />} />
         <Route path="/calendar" element={<CalendarPage />} />
+        <Route path="/admin" element={<AdminPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </Router>

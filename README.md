@@ -15,7 +15,7 @@ frontend/
     api.ts             client for the backend
     slots.ts           time slots, their colours and the booking limit
     assets/            images imported by the code
-    pages/             one file per route: /, /login, /create-account, /calendar
+    pages/             one file per route: /, /login, /create-account, /calendar, /admin
     components/        pieces used by the pages
 backend/
   server.py            the API
@@ -72,6 +72,18 @@ and `npm run lint:backend` before committing.
 - Logged-in users can see who has booked a slot; visitors cannot.
 
 All rules are enforced by the backend; the frontend only mirrors them.
+
+## Admins
+
+An admin can cancel anyone's booking from the calendar, and delete accounts
+(for example when someone moves out) under **Menu → Manage users**. The first
+admin is appointed from the command line, in `backend/`:
+
+```bash
+.venv/bin/flask --app server set-admin USERNAME
+```
+
+Add `--remove` to take the role away again.
 
 ## Backend configuration
 

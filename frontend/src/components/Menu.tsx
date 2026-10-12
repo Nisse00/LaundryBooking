@@ -5,11 +5,12 @@ import { Link } from "react-router-dom";
 
 interface MenuProps {
   readonly username: string | null;
+  readonly isAdmin?: boolean;
   readonly onLogOut: () => void;
 }
 
 /** Menu button that opens a panel on the left with account actions and navigation. */
-export default function Menu({ username, onLogOut }: MenuProps) {
+export default function Menu({ username, isAdmin = false, onLogOut }: MenuProps) {
   const [open, setOpen] = useState(false);
   const close = () => setOpen(false);
 
@@ -52,6 +53,11 @@ export default function Menu({ username, onLogOut }: MenuProps) {
             <Link className="btn btn-outline-secondary" to="/">
               Start page
             </Link>
+            {isAdmin && (
+              <Link className="btn btn-outline-secondary" to="/admin">
+                Manage users
+              </Link>
+            )}
           </nav>
         </Offcanvas.Body>
       </Offcanvas>
