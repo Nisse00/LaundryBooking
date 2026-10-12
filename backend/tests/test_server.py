@@ -382,6 +382,40 @@ class TestPasswordReset:
         assert app.test_cli_runner().invoke(args=["reset-code", "nobody"]).exit_code != 0
 
 
+class TestBackup:
+    @pytest.fixture
+    def app(self, tmp_path):
+        return create_app(
+            {
+                "DATABASE": tmp_path / "test.db",
+                "BACKUP_DIR": tmp_path / "backups",
+                "SECRET_KEY": "test",
+            }
+        )
+
+    def test_backup_is_a_copy_of_the_database(self, app, tmp_path):
+        book(register(app, "anna"), day(1), 2)
+        result = app.test_cli_runner().invoke(args=["backup"])
+        assert result.exit_code == 0, result.output
+        with sqlite3.connect(tmp_path / "backups" / f"laundry-{day(0)}.db") as conn:
+            assert conn.execute("SELECT username, booking_time FROM bookings").fetchall() == [
+                ("anna", 2)
+            ]
+
+    def test_old_backups_are_removed(self, app, tmp_path):
+        folder = tmp_path / "backups"
+        folder.mkdir()
+        for name in ("laundry-2020-01-01.db", "laundry-2020-01-02.db", "laundry-2020-01-03.db"):
+            (folder / name).touch()
+        (folder / "notes.txt").touch()
+        assert app.test_cli_runner().invoke(args=["backup", "--keep", "2"]).exit_code == 0
+        assert sorted(path.name for path in folder.iterdir()) == [
+            "laundry-2020-01-03.db",
+            f"laundry-{day(0)}.db",
+            "notes.txt",
+        ]
+
+
 @pytest.mark.parametrize(
     "today, expected",
     [

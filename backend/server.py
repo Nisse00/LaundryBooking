@@ -87,6 +87,7 @@ def create_app(config=None):
     app = Flask(__name__)
     app.config.update(
         DATABASE=os.environ.get("LAUNDRY_DATABASE", BASE_DIR / "laundry.db"),
+        BACKUP_DIR=os.environ.get("LAUNDRY_BACKUP_DIR", BASE_DIR / "backups"),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE") == "1",
@@ -109,6 +110,7 @@ def create_app(config=None):
     app.register_blueprint(api)
     app.cli.add_command(set_admin)
     app.cli.add_command(reset_code)
+    app.cli.add_command(backup)
     return app
 
 
@@ -148,6 +150,25 @@ def close_db(_exc=None):
     db = g.pop("db", None)
     if db is not None:
         db.close()
+
+
+@click.command("backup")
+@click.option("--keep", default=14, show_default=True, help="Number of backups to keep.")
+@with_appcontext
+def backup(keep):
+    """Copy the database to the backup folder, one file per day.
+
+    Safe to run while the server is in use. Meant for a daily cron job.
+    """
+    folder = Path(current_app.config["BACKUP_DIR"])
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"laundry-{today().isoformat()}.db"
+    with closing(sqlite3.connect(target)) as copy:
+        get_db().backup(copy)
+    # The date in the name makes alphabetical order the same as by age
+    for old in sorted(folder.glob("laundry-*.db"))[: -max(keep, 1)]:
+        old.unlink()
+    click.echo(f"Backed up to {target}")
 
 
 @click.command("reset-code")

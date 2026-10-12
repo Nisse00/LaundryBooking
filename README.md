@@ -108,6 +108,7 @@ Environment variables, all optional:
 | ----------------------- | --------------------------------------- | -------------------------------------------- |
 | `SECRET_KEY`            | random, stored in `backend/.secret_key` | Signs the session cookie                     |
 | `LAUNDRY_DATABASE`      | `backend/laundry.db`                    | Path to the SQLite database                  |
+| `LAUNDRY_BACKUP_DIR`    | `backend/backups/`                      | Where `flask backup` puts its copies         |
 | `SESSION_COOKIE_SECURE` | off                                     | Set to `1` in production (HTTPS only cookie) |
 | `INVITE_CODE`           | none                                    | Code needed to create an account             |
 | `FLASK_DEBUG`           | off                                     | Auto-reload; the `dev` scripts turn it on    |
@@ -116,6 +117,27 @@ Set `INVITE_CODE` in production and share the code within the building. Without
 it, anyone who finds the site can create an account and book time slots.
 
 The database is created on first start and is not checked in to git.
+
+## Backups
+
+Every account and booking lives in the one database file, so back it up. This
+copies it to the backup folder, one file per day, and keeps the latest 14
+(change with `--keep`). It is safe to run while the server is in use:
+
+```bash
+.venv/bin/flask --app server backup
+```
+
+Run it daily on the server, for example with this line in `crontab -e`
+(adjust the path):
+
+```
+15 3 * * * cd /srv/laundry/backend && .venv/bin/flask --app server backup
+```
+
+The copies end up on the same disk as the database. Also sync the backup
+folder to another machine or to cloud storage, or a broken disk takes both.
+To restore, stop the server and replace the database file with a backup.
 
 In production, serve `frontend/dist/` and forward `/api` to the Flask app from the
 same domain (run it with a WSGI server, e.g. `gunicorn "server:create_app()"`, not
