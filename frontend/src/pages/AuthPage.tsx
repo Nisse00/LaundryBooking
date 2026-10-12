@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { errorMessage, inviteCodeRequired, login, register } from "../api";
 
 // Keep in sync with MIN_PASSWORD_LENGTH in backend/server.py
@@ -102,6 +102,11 @@ export default function AuthPage({ mode }: AuthPageProps) {
             {title}
           </button>
         </form>
+        {mode === "login" && (
+          <p className="text-center mt-3">
+            <Link to="/reset-password">Forgot your password?</Link>
+          </p>
+        )}
       </div>
     </div>
   );

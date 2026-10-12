@@ -277,6 +277,76 @@ class TestAdmin:
         assert anna.delete(f"{API}/users/anna").status_code == 400
 
 
+class TestPasswordReset:
+    NEW_PASSWORD = "battery staple"
+
+    def reset(self, client, username, code, password=NEW_PASSWORD):
+        payload = {"username": username, "code": code, "password": password}
+        return client.post(f"{API}/reset-password", json=payload)
+
+    def code_for(self, admin, username):
+        response = admin.post(f"{API}/users/{username}/reset-code")
+        assert response.status_code == 201
+        return response.get_json()["code"]
+
+    def test_reset_with_code_from_admin(self, app, client):
+        anna = register_admin(app, "anna")
+        register(app, "bert")
+        code = self.code_for(anna, "bert")
+        assert self.reset(client, "bert", code).status_code == 200
+        assert client.get(f"{API}/user").get_json()["username"] == "bert"
+
+        fresh = app.test_client()
+        old = {"username": "bert", "password": PASSWORD}
+        new = {"username": "bert", "password": self.NEW_PASSWORD}
+        assert fresh.post(f"{API}/login", json=old).status_code == 401
+        assert fresh.post(f"{API}/login", json=new).status_code == 200
+
+    def test_code_works_only_once(self, app, client):
+        anna = register_admin(app, "anna")
+        code = self.code_for(anna, "anna")
+        assert self.reset(client, "anna", code).status_code == 200
+        assert self.reset(client, "anna", code).status_code == 400
+
+    def test_new_code_replaces_the_old_one(self, app, client):
+        anna = register_admin(app, "anna")
+        first, second = self.code_for(anna, "anna"), self.code_for(anna, "anna")
+        assert self.reset(client, "anna", first).status_code == 400
+        assert self.reset(client, "anna", second).status_code == 200
+
+    def test_wrong_code_or_user_is_rejected(self, app, client):
+        anna = register_admin(app, "anna")
+        register(app, "bert")
+        code = self.code_for(anna, "bert")
+        assert self.reset(client, "bert", "guess").status_code == 400
+        assert self.reset(client, "anna", code).status_code == 400
+        assert self.reset(client, "bert", code, password="short").status_code == 400
+        assert client.post(f"{API}/reset-password", json={}).status_code == 400
+        # None of the failed attempts used the code up
+        assert self.reset(client, "bert", code).status_code == 200
+
+    def test_expired_code_is_rejected(self, app, client, monkeypatch):
+        anna = register_admin(app, "anna")
+        code = self.code_for(anna, "anna")
+        later = server.time.time() + server.RESET_CODE_LIFETIME.total_seconds() + 1
+        monkeypatch.setattr(server.time, "time", lambda: later)
+        assert self.reset(client, "anna", code).status_code == 400
+
+    def test_only_admins_can_create_codes(self, app, client):
+        anna, bert = register_admin(app, "anna"), register(app, "bert")
+        assert client.post(f"{API}/users/bert/reset-code").status_code == 401
+        assert bert.post(f"{API}/users/bert/reset-code").status_code == 403
+        assert anna.post(f"{API}/users/nobody/reset-code").status_code == 404
+
+    def test_reset_code_command(self, app, client):
+        register(app, "anna")
+        result = app.test_cli_runner().invoke(args=["reset-code", "anna"])
+        assert result.exit_code == 0, result.output
+        code = result.output.strip().rsplit(" ", 1)[-1]
+        assert self.reset(client, "anna", code).status_code == 200
+        assert app.test_cli_runner().invoke(args=["reset-code", "nobody"]).exit_code != 0
+
+
 @pytest.mark.parametrize(
     "today, expected",
     [

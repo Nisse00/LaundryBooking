@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   AdminUser,
+  createResetCode,
   CurrentUser,
   deleteUser,
   errorMessage,
@@ -16,7 +17,7 @@ interface Notice {
   readonly text: string;
 }
 
-/** Lets an admin see all accounts and remove the ones no longer in use. */
+/** Lets an admin see all accounts, help with forgotten passwords and remove old accounts. */
 export default function AdminPage() {
   // null until we know who is logged in
   const [user, setUser] = useState<CurrentUser | null>(null);
@@ -47,6 +48,20 @@ export default function AdminPage() {
     try {
       await logout();
       navigate("/calendar");
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  async function handleResetPassword(target: AdminUser) {
+    try {
+      const { code, validHours } = await createResetCode(target.username);
+      setNotice({
+        kind: "success",
+        text:
+          `Reset code for ${target.username}: ${code} · Give it to them and ask them to choose ` +
+          `"Forgot your password?" on the log in page. It works once, within ${validHours} hours.`,
+      });
     } catch (err) {
       fail(err);
     }
@@ -101,6 +116,13 @@ export default function AdminPage() {
                   </td>
                   <td>{row.activeBookings}</td>
                   <td className="text-end">
+                    <button
+                      type="button"
+                      className="btn btn-outline-secondary btn-sm me-2"
+                      onClick={() => handleResetPassword(row)}
+                    >
+                      Reset password
+                    </button>
                     {row.username !== user.username && (
                       <button
                         type="button"

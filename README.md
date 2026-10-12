@@ -15,7 +15,8 @@ frontend/
     api.ts             client for the backend
     slots.ts           time slots, their colours and the booking limit
     assets/            images imported by the code
-    pages/             one file per route: /, /login, /create-account, /calendar, /admin
+    pages/             one file per route: /, /login, /create-account, /reset-password,
+                       /calendar, /admin
     components/        pieces used by the pages
 backend/
   server.py            the API
@@ -84,6 +85,17 @@ admin is appointed from the command line, in `backend/`:
 ```
 
 Add `--remove` to take the role away again.
+
+### Forgotten passwords
+
+There is no email in the system, so an admin helps out: **Reset password** on
+the Manage users page shows a one-time code, valid for 24 hours. The user
+enters it under **Forgot your password?** on the log in page and chooses a new
+password. An admin who is locked out themselves gets a code with:
+
+```bash
+.venv/bin/flask --app server reset-code USERNAME
+```
 
 ## Backend configuration
 

@@ -71,6 +71,22 @@ export async function getUsers(): Promise<AdminUser[]> {
   return (await request<{ users: AdminUser[] }>("/users")).users;
 }
 
+/** Admins only. A one-time code that lets the user choose a new password. */
+export async function createResetCode(
+  username: string,
+): Promise<{ code: string; validHours: number }> {
+  return await request(`/users/${encodeURIComponent(username)}/reset-code`, "POST");
+}
+
+/** Choose a new password with a code from an admin. Logs you in. */
+export async function resetPassword(
+  username: string,
+  code: string,
+  password: string,
+): Promise<void> {
+  await request("/reset-password", "POST", { username, code, password });
+}
+
 /** Admins only. Also removes the user's bookings. */
 export async function deleteUser(username: string): Promise<void> {
   await request(`/users/${encodeURIComponent(username)}`, "DELETE");
