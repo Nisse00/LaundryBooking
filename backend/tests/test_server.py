@@ -64,6 +64,22 @@ class TestAccounts:
     def test_invalid_registration_is_rejected(self, client, payload):
         assert client.post(f"{API}/register", json=payload).status_code == 400
 
+    def test_invite_code_is_required_when_configured(self, tmp_path):
+        app = create_app(
+            {"DATABASE": tmp_path / "test.db", "SECRET_KEY": "test", "INVITE_CODE": "botan"}
+        )
+        client = app.test_client()
+        account = {"username": "anna", "password": PASSWORD}
+        assert client.get(f"{API}/registration").get_json() == {"inviteCodeRequired": True}
+        assert client.post(f"{API}/register", json=account).status_code == 403
+        wrong = {**account, "inviteCode": "guess"}
+        assert client.post(f"{API}/register", json=wrong).status_code == 403
+        right = {**account, "inviteCode": " botan "}
+        assert client.post(f"{API}/register", json=right).status_code == 201
+
+    def test_no_invite_code_by_default(self, client):
+        assert client.get(f"{API}/registration").get_json() == {"inviteCodeRequired": False}
+
     def test_password_is_stored_hashed(self, app):
         register(app, "anna")
         with sqlite3.connect(app.config["DATABASE"]) as conn:

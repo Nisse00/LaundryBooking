@@ -66,6 +66,8 @@ def create_app(config=None):
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE") == "1",
         PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+        # Creating an account requires this code when it is set
+        INVITE_CODE=os.environ.get("INVITE_CODE", ""),
     )
     app.config.update(config or {})
     if not app.config.get("SECRET_KEY"):
@@ -152,11 +154,24 @@ def parse_slot(booking_date, slot):
     return None
 
 
+@api.get("/registration")
+def registration():
+    """Tells the create-account form whether to ask for an invite code."""
+    return jsonify({"inviteCodeRequired": bool(current_app.config["INVITE_CODE"])})
+
+
 @api.post("/register")
 def register():
     username, password = credentials()
     if not username or not password:
         return error("Username and password are required.", 400)
+    invite_code = current_app.config["INVITE_CODE"]
+    if invite_code:
+        given = (request.get_json(silent=True) or {}).get("inviteCode")
+        if not isinstance(given, str) or not hmac.compare_digest(
+            given.strip().encode(), invite_code.encode()
+        ):
+            return error("Wrong invite code.", 403)
     if len(password) < MIN_PASSWORD_LENGTH:
         return error(f"The password must be at least {MIN_PASSWORD_LENGTH} characters.", 400)
 

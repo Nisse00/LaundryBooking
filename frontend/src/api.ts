@@ -36,8 +36,17 @@ export async function login(username: string, password: string): Promise<void> {
   await request("/login", "POST", { username, password });
 }
 
-export async function register(username: string, password: string): Promise<void> {
-  await request("/register", "POST", { username, password });
+export async function register(
+  username: string,
+  password: string,
+  inviteCode: string,
+): Promise<void> {
+  await request("/register", "POST", { username, password, inviteCode });
+}
+
+/** Whether creating an account requires the invite code. */
+export async function inviteCodeRequired(): Promise<boolean> {
+  return (await request<{ inviteCodeRequired: boolean }>("/registration")).inviteCodeRequired;
 }
 
 export async function logout(): Promise<void> {

@@ -82,7 +82,11 @@ Environment variables, all optional:
 | `SECRET_KEY`            | random, stored in `backend/.secret_key` | Signs the session cookie                     |
 | `LAUNDRY_DATABASE`      | `backend/laundry.db`                    | Path to the SQLite database                  |
 | `SESSION_COOKIE_SECURE` | off                                     | Set to `1` in production (HTTPS only cookie) |
+| `INVITE_CODE`           | none                                    | Code needed to create an account             |
 | `FLASK_DEBUG`           | off                                     | Auto-reload; the `dev` scripts turn it on    |
+
+Set `INVITE_CODE` in production and share the code within the building. Without
+it, anyone who finds the site can create an account and book time slots.
 
 The database is created on first start and is not checked in to git.
 
