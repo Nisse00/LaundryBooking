@@ -74,6 +74,9 @@ and `npm run lint:backend` before committing.
 
 All rules are enforced by the backend; the frontend only mirrors them.
 
+To slow down password guessing, ten wrong passwords for one username block
+logging in to that account for up to 15 minutes.
+
 ## Admins
 
 An admin can cancel anyone's booking from the calendar, and delete accounts

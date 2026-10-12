@@ -27,6 +27,10 @@ SLOTS = (1, 2, 3)
 MIN_PASSWORD_LENGTH = 8
 MAX_ACTIVE_BOOKINGS = 3
 RESET_CODE_LIFETIME = timedelta(hours=24)
+# After this many wrong passwords for one username, logging in to it is
+# blocked until the oldest attempt is older than the window
+MAX_FAILED_LOGINS = 10
+FAILED_LOGIN_WINDOW = timedelta(minutes=15)
 HASH_PREFIXES = ("scrypt:", "pbkdf2:")
 
 SCHEMA = """
@@ -50,6 +54,13 @@ SCHEMA = """
         expires_at INTEGER NOT NULL,
         FOREIGN KEY (username) REFERENCES laundry_users(username)
     );
+    -- Wrong passwords, to slow down guessing; attempted_at is a Unix timestamp.
+    -- The username need not exist.
+    CREATE TABLE IF NOT EXISTS failed_logins (
+        username TEXT NOT NULL,
+        attempted_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS failed_logins_username ON failed_logins (username);
     -- An index rather than a table constraint so that databases created
     -- before the constraint existed get it too. This is what prevents
     -- two people from booking the same slot.
@@ -296,6 +307,15 @@ def register():
 def login():
     username, password = credentials()
     db = get_db()
+    window_start = int(time.time() - FAILED_LOGIN_WINDOW.total_seconds())
+    (failures,) = db.execute(
+        "SELECT COUNT(*) FROM failed_logins WHERE username = ? AND attempted_at > ?",
+        (username, window_start),
+    ).fetchone()
+    if failures >= MAX_FAILED_LOGINS:
+        minutes = int(FAILED_LOGIN_WINDOW.total_seconds() // 60)
+        return error(f"Too many failed attempts. Wait up to {minutes} minutes and try again.", 429)
+
     row = db.execute(
         "SELECT password FROM laundry_users WHERE username = ?", (username,)
     ).fetchone()
@@ -314,8 +334,14 @@ def login():
             )
 
     if not valid:
+        db.execute("DELETE FROM failed_logins WHERE attempted_at <= ?", (window_start,))
+        db.execute(
+            "INSERT INTO failed_logins (username, attempted_at) VALUES (?, ?)",
+            (username, int(time.time())),
+        )
         return error("Wrong username or password.", 401)
 
+    db.execute("DELETE FROM failed_logins WHERE username = ?", (username,))
     log_in(username)
     return current_user()
 
@@ -343,6 +369,7 @@ def reset_password():
         "UPDATE laundry_users SET password = ? WHERE username = ?",
         (generate_password_hash(password), username),
     )
+    db.execute("DELETE FROM failed_logins WHERE username = ?", (username,))
     log_in(username)
     return current_user()
 

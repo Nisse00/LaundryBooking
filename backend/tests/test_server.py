@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 import server
-from server import MAX_ACTIVE_BOOKINGS, create_app, last_bookable_day
+from server import MAX_ACTIVE_BOOKINGS, MAX_FAILED_LOGINS, create_app, last_bookable_day
 
 API = "/api/laundry"
 PASSWORD = "correct horse"
@@ -124,6 +124,41 @@ class TestAccounts:
             (stored,) = conn.execute("SELECT password FROM laundry_users").fetchone()
         assert stored != "plaintext"
         assert app.test_client().post(f"{API}/login", json=credentials).status_code == 200
+
+
+class TestLoginAttempts:
+    RIGHT = {"username": "anna", "password": PASSWORD}
+    WRONG = {"username": "anna", "password": "wrong password"}
+
+    def fail_until_blocked(self, client):
+        for _ in range(MAX_FAILED_LOGINS):
+            assert client.post(f"{API}/login", json=self.WRONG).status_code == 401
+        assert client.post(f"{API}/login", json=self.WRONG).status_code == 429
+
+    def test_too_many_wrong_passwords_block_the_username(self, app, client):
+        register(app, "anna")
+        register(app, "bert")
+        self.fail_until_blocked(client)
+        # Even the right password, and from another browser
+        assert app.test_client().post(f"{API}/login", json=self.RIGHT).status_code == 429
+        # Other users are not affected
+        bert = {"username": "bert", "password": PASSWORD}
+        assert client.post(f"{API}/login", json=bert).status_code == 200
+
+    def test_block_is_lifted_after_a_while(self, app, client, monkeypatch):
+        register(app, "anna")
+        self.fail_until_blocked(client)
+        later = server.time.time() + server.FAILED_LOGIN_WINDOW.total_seconds() + 1
+        monkeypatch.setattr(server.time, "time", lambda: later)
+        assert client.post(f"{API}/login", json=self.RIGHT).status_code == 200
+
+    def test_successful_login_clears_the_count(self, app, client):
+        register(app, "anna")
+        for _ in range(MAX_FAILED_LOGINS - 1):
+            client.post(f"{API}/login", json=self.WRONG)
+        assert client.post(f"{API}/login", json=self.RIGHT).status_code == 200
+        assert client.post(f"{API}/login", json=self.WRONG).status_code == 401
+        assert client.post(f"{API}/login", json=self.RIGHT).status_code == 200
 
 
 class TestBookings:
